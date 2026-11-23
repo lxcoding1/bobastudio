@@ -1,0 +1,6 @@
+{
+  "name": "Boba Studio",
+  "description": "An isometric 3D toon and pixel-art bubble tea shop simulator built with Three.js and PixiJS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
