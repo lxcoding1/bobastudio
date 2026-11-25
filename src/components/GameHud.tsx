@@ -1,20 +1,25 @@
 import type { RefObject } from 'react';
 import {
+  getTimeOfDayPhase,
+  MAX_SIM_SPEED,
   MILK_META,
   PERCENT_OPTIONS,
   TEA_BASE_META,
   TOPPING_META,
 } from '../game/catalog';
-import { checkCanCraftDrink, formatShopClock } from '../game/simulation';
+import {
+  checkCanCraftDrink,
+  formatShopClock,
+  getUnlockedMilks,
+  getUnlockedTeaBases,
+  getUnlockedToppings,
+} from '../game/simulation';
 import type {
   DrinkBuild,
-  MilkOption,
   OrderTicket,
   PercentLevel,
   RenderStyle,
   SimState,
-  TeaBase,
-  ToppingOption,
 } from '../game/types';
 
 interface GameHudProps {
@@ -25,7 +30,8 @@ interface GameHudProps {
   crafterMountRef: RefObject<HTMLDivElement | null>;
   onToggleBench: () => void;
   onChangeRenderStyle: (style: RenderStyle) => void;
-  onToggleSpeed: () => void;
+  onCycleSpeed: () => void;
+  onSetSpeed: (speed: number) => void;
   onOpenPantry: () => void;
   onToggleMute: () => void;
   onPause: () => void;
@@ -36,9 +42,6 @@ interface GameHudProps {
   onServeDrink: () => void;
 }
 
-const TEA_KEYS: TeaBase[] = ['assam', 'jasmine', 'oolong', 'matcha', 'taro'];
-const MILK_KEYS: MilkOption[] = ['none', 'whole', 'oat', 'brown_sugar', 'cheese_foam'];
-const TOPPING_KEYS: ToppingOption[] = ['none', 'boba', 'crystal_boba', 'lychee_jelly', 'pudding'];
 
 export function GameHud({
   state,
@@ -48,7 +51,8 @@ export function GameHud({
   crafterMountRef,
   onToggleBench,
   onChangeRenderStyle,
-  onToggleSpeed,
+  onCycleSpeed,
+  onSetSpeed,
   onOpenPantry,
   onToggleMute,
   onPause,
@@ -63,6 +67,11 @@ export function GameHud({
 
   const craftCheck = checkCanCraftDrink(state, state.currentBuild);
   const bobaPct = Math.round(state.bobaPot.freshness);
+  const timePhase = getTimeOfDayPhase(state.simMinutes);
+  const onDutyCount = state.employees.filter((e) => e.onDuty).length;
+  const teaKeys = getUnlockedTeaBases(state.unlockedResearch);
+  const milkKeys = getUnlockedMilks(state.unlockedResearch);
+  const toppingKeys = getUnlockedToppings(state.unlockedResearch);
 
   return (
     <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-3 md:p-4">
@@ -96,8 +105,11 @@ export function GameHud({
             </div>
             <div className="h-6 sm:h-7 w-px bg-[#1b2e2d]/15" aria-hidden="true" />
             <div>
-              <div className="text-[10px] font-bold uppercase tracking-wider text-[#4b6866]">
-                Day {state.day}
+              <div
+                className="text-[10px] font-bold uppercase tracking-wider text-[#4b6866] whitespace-nowrap"
+                data-testid="hud-day-phase"
+              >
+                Day {state.day} · {timePhase.label}
               </div>
               <div className="font-mono-num text-xs sm:text-sm font-bold text-[#182a29] leading-tight whitespace-nowrap">
                 {formatShopClock(state.simMinutes)}
@@ -106,10 +118,10 @@ export function GameHud({
             <div className="h-7 w-px bg-[#1b2e2d]/15 hidden sm:block" aria-hidden="true" />
             <div className="hidden sm:block">
               <div className="text-[10px] font-bold uppercase tracking-wider text-[#4b6866]">
-                Served
+                Served · Staff
               </div>
-              <div className="font-mono-num text-sm font-bold text-[#217a62] leading-tight">
-                {state.totalServed} · {state.streak}x
+              <div className="font-mono-num text-sm font-bold text-[#217a62] leading-tight whitespace-nowrap">
+                {state.totalServed} · {onDutyCount}/{state.maxStaffSlots}
               </div>
             </div>
           </div>
@@ -141,6 +153,11 @@ export function GameHud({
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-bold text-[#182a29] truncate">
                         #{order.ticketNumber} · {order.customerName}
+                        {order.isRefill && (
+                          <span className="ml-1.5 rounded border border-[#235958]/40 bg-[#e6f5ef] px-1 py-0.5 text-[9px] font-bold uppercase text-[#217a62]">
+                            Refill
+                          </span>
+                        )}
                       </span>
                       <span className="font-mono-num text-[11px] font-bold text-[#217a62] shrink-0">
                         ${order.price.toFixed(2)}
@@ -150,13 +167,9 @@ export function GameHud({
                       {order.recipe.name}
                     </div>
                     <div className="text-[11px] text-[#45615f] mt-0.5 truncate">
-                      {TEA_BASE_META[order.recipe.teaBase].short}
-                      {' · '}
-                      {MILK_META[order.recipe.milk].short}
-                      {' · '}
-                      {TOPPING_META[order.recipe.topping].short}
-                      {' · '}
-                      {order.ice}% Ice · {order.sweetness}% Sug
+                      {order.status === 'staff_crafting'
+                        ? `Staff crafting (${Math.round(order.sealProgress * 100)}%)`
+                        : `${TEA_BASE_META[order.recipe.teaBase].short} · ${MILK_META[order.recipe.milk].short} · ${TOPPING_META[order.recipe.topping].short} · ${order.ice}% Ice · ${order.sweetness}% Sug`}
                     </div>
                     <div className="mt-1.5 h-1.5 w-full rounded-sm bg-[#dfd5c1] overflow-hidden">
                       <div
@@ -190,34 +203,69 @@ export function GameHud({
             {renderStyle === 'toon' ? '3D Toon' : 'Pixel-Art'}
           </button>
 
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label={`Simulation speed ${state.speedMultiplier}x`}
-            onClick={(e) => {
-              e.currentTarget.blur();
-              onToggleSpeed();
-            }}
-            className={`ink-btn rounded-lg px-2.5 h-9 sm:h-10 font-mono-num text-xs font-bold whitespace-nowrap cursor-pointer ${
-              state.speedMultiplier === 2
-                ? 'bg-[#e06d53] text-white'
-                : 'bg-[#f7f1e5] text-[#182a29]'
-            }`}
+          <div
+            className="flex items-center rounded-lg border-2 border-[#1b2e2d] bg-[#f7f1e5] shadow-[2px_2px_0_#1b2e2d] h-9 sm:h-10 overflow-hidden"
+            role="group"
+            aria-label="Simulation speed controls"
           >
-            {state.speedMultiplier}×
-          </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              disabled={state.speedMultiplier <= 1}
+              aria-label="Decrease simulation speed"
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onSetSpeed(state.speedMultiplier - 1);
+              }}
+              className="px-2 h-full font-mono-num text-xs font-bold text-[#182a29] hover:bg-[#ebe1cd] disabled:opacity-35 cursor-pointer border-r border-[#1b2e2d]/20"
+            >
+              -
+            </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              data-testid="speed-display"
+              aria-label={`Simulation speed ${state.speedMultiplier}x (click to cycle up to 10x)`}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onCycleSpeed();
+              }}
+              className={`px-2.5 h-full font-mono-num text-xs font-bold whitespace-nowrap cursor-pointer ${
+                state.speedMultiplier >= 5
+                  ? 'bg-[#e06d53] text-white'
+                  : state.speedMultiplier > 1
+                    ? 'bg-[#fff3d2] text-[#182a29]'
+                    : 'bg-[#f7f1e5] text-[#182a29]'
+              }`}
+            >
+              {state.speedMultiplier}×
+            </button>
+            <button
+              type="button"
+              tabIndex={-1}
+              disabled={state.speedMultiplier >= MAX_SIM_SPEED}
+              aria-label="Increase simulation speed"
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onSetSpeed(state.speedMultiplier + 1);
+              }}
+              className="px-2 h-full font-mono-num text-xs font-bold text-[#182a29] hover:bg-[#ebe1cd] disabled:opacity-35 cursor-pointer border-l border-[#1b2e2d]/20"
+            >
+              +
+            </button>
+          </div>
 
           <button
             type="button"
             tabIndex={-1}
-            aria-label="Open Pantry and Upgrades"
+            aria-label="Open Shop, Staff and Pantry Management"
             onClick={(e) => {
               e.currentTarget.blur();
               onOpenPantry();
             }}
             className="ink-btn rounded-lg bg-[#235958] text-[#f6efe0] px-2.5 sm:px-3 h-9 sm:h-10 text-xs font-bold whitespace-nowrap cursor-pointer"
           >
-            Pantry [U]
+            Shop &amp; Staff [U]
           </button>
 
           <button
@@ -258,15 +306,13 @@ export function GameHud({
         </div>
       </div>
 
-      {/* Transient Alert Banner */}
-      {state.bannerMessage && (
-        <div className="mx-auto pointer-events-none ink-panel-dark rounded-lg px-4 py-1.5 text-xs font-bold">
-          {state.bannerMessage}
-        </div>
-      )}
-
       {/* Collapsible Bottom Prep & Drink Crafting Dock */}
       <div className="mx-auto w-full max-w-6xl flex flex-col items-center pointer-events-none">
+        {state.bannerMessage && (
+          <div className="mb-2 pointer-events-none ink-panel-dark rounded-lg px-4 py-1.5 text-xs font-bold whitespace-nowrap max-w-[92vw] truncate">
+            {state.bannerMessage}
+          </div>
+        )}
         <button
           type="button"
           tabIndex={-1}
@@ -370,9 +416,9 @@ export function GameHud({
             {/* 3. Drink Ingredient Selectors */}
             <div className="space-y-1.5 min-w-0">
               {/* Row 1: Tea Base */}
-              <div className="flex flex-wrap items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1" data-testid="tea-base-buttons">
                 <span className="text-[11px] font-bold text-[#4b6866] w-11 shrink-0">Tea</span>
-                {TEA_KEYS.map((key, idx) => {
+                {teaKeys.map((key, idx) => {
                   const meta = TEA_BASE_META[key];
                   const active = state.currentBuild.teaBase === key;
                   const targetMatch = selectedOrder?.recipe.teaBase === key;
@@ -407,9 +453,9 @@ export function GameHud({
               </div>
 
               {/* Row 2: Milk / Foam */}
-              <div className="flex flex-wrap items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1" data-testid="milk-buttons">
                 <span className="text-[11px] font-bold text-[#4b6866] w-11 shrink-0">Milk</span>
-                {MILK_KEYS.map((key) => {
+                {milkKeys.map((key) => {
                   const meta = MILK_META[key];
                   const active = state.currentBuild.milk === key;
                   const targetMatch = selectedOrder?.recipe.milk === key;
@@ -440,9 +486,9 @@ export function GameHud({
               </div>
 
               {/* Row 3: Toppings */}
-              <div className="flex flex-wrap items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1" data-testid="topping-buttons">
                 <span className="text-[11px] font-bold text-[#4b6866] w-11 shrink-0">Top</span>
-                {TOPPING_KEYS.map((key) => {
+                {toppingKeys.map((key) => {
                   const meta = TOPPING_META[key];
                   const active = state.currentBuild.topping === key;
                   const targetMatch = selectedOrder?.recipe.topping === key;
@@ -549,7 +595,7 @@ export function GameHud({
                 type="button"
                 disabled={
                   !selectedOrder ||
-                  selectedOrder.status === 'sealing' ||
+                  selectedOrder.status !== 'waiting' ||
                   !craftCheck.canCraft
                 }
                 onClick={(e) => {
@@ -560,7 +606,9 @@ export function GameHud({
               >
                 {selectedOrder?.status === 'sealing'
                   ? `Sealing ${Math.round(selectedOrder.sealProgress * 100)}%`
-                  : 'Brew & Serve [Space]'}
+                  : selectedOrder?.status === 'staff_crafting'
+                    ? `Staff Crafting ${Math.round(selectedOrder.sealProgress * 100)}%`
+                    : 'Brew & Serve [Space]'}
               </button>
               <div className="text-[10px] font-semibold text-center text-[#b8462c] min-h-[14px] leading-tight">
                 {!selectedOrder

@@ -137,8 +137,12 @@ export async function createDrinkCrafter(
         .closePath()
         .fill({ color: teaColor, alpha: 0.92 });
 
-      // Milk / Brown Sugar / Cheese Foam Layer
-      if (build.milk === 'whole' || build.milk === 'oat') {
+      // Milk / Brown Sugar / Cheese Foam / Coconut Cream / Salted Caramel Layer
+      if (
+        build.milk === 'whole' ||
+        build.milk === 'oat' ||
+        build.milk === 'coconut_cream'
+      ) {
         const milkColor = MILK_META[build.milk].color;
         liquidG
           .moveTo(-surfW, surfaceY)
@@ -146,24 +150,25 @@ export async function createDrinkCrafter(
           .lineTo(surfW * 0.94, surfaceY + 26)
           .lineTo(-surfW * 0.94, surfaceY + 26)
           .closePath()
-          .fill({ color: milkColor, alpha: 0.58 });
-      } else if (build.milk === 'brown_sugar') {
-        // Tiger stripes
+          .fill({ color: milkColor, alpha: build.milk === 'coconut_cream' ? 0.78 : 0.58 });
+      } else if (build.milk === 'brown_sugar' || build.milk === 'salted_caramel') {
+        const stripeHex = build.milk === 'salted_caramel' ? 0xc67e3b : 0x562914;
+        // Drizzle stripes
         liquidG
           .moveTo(-surfW + 4, surfaceY + 12)
           .lineTo(-surfW + 10, surfaceY + 34)
-          .stroke({ width: 4, color: 0x562914, alpha: 0.78 });
+          .stroke({ width: 4, color: stripeHex, alpha: 0.82 });
         liquidG
           .moveTo(surfW - 6, surfaceY + 14)
           .lineTo(surfW - 11, surfaceY + 38)
-          .stroke({ width: 3.5, color: 0x562914, alpha: 0.78 });
+          .stroke({ width: 3.5, color: stripeHex, alpha: 0.82 });
         liquidG
           .moveTo(-bW, botY - 12)
           .lineTo(bW, botY - 12)
           .lineTo(bW, botY - 2)
           .lineTo(-bW, botY - 2)
           .closePath()
-          .fill({ color: 0x562914, alpha: 0.65 });
+          .fill({ color: stripeHex, alpha: 0.65 });
       } else if (build.milk === 'cheese_foam') {
         const foamBottom = surfaceY + 15;
         const fW = lerpWidth(foamBottom) - 2;
@@ -193,16 +198,23 @@ export async function createDrinkCrafter(
             if (Math.abs(p.vy) < 12) p.vy = 0;
           }
         }
-        if (build.topping === 'boba' || build.topping === 'crystal_boba') {
+        if (
+          build.topping === 'boba' ||
+          build.topping === 'crystal_boba' ||
+          build.topping === 'popping_boba'
+        ) {
           toppingG
             .circle(p.x, p.y, p.r)
-            .fill({ color: topColor, alpha: build.topping === 'crystal_boba' ? 0.85 : 1 })
+            .fill({
+              color: topColor,
+              alpha: build.topping === 'crystal_boba' ? 0.85 : build.topping === 'popping_boba' ? 0.92 : 1,
+            })
             .stroke({ width: 1.2, color: 0x1b2e2d });
         } else {
-          // Cubes for lychee jelly or pudding slices
+          // Cubes for lychee jelly, aloe vera, or pudding slices
           toppingG
             .roundRect(p.x - 4, p.y - 3.5, 8, 7, 1.5)
-            .fill({ color: topColor, alpha: 0.92 })
+            .fill({ color: topColor, alpha: build.topping === 'aloe_vera' ? 0.84 : 0.92 })
             .stroke({ width: 1.2, color: 0x1b2e2d });
         }
       }

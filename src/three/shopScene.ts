@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import type { CustomerEntity, RenderStyle, SimState } from '../game/types';
+import type { ActorAppearance, CustomerEntity, RenderStyle, SimState } from '../game/types';
 import {
   addInkEdges,
   createShopPalette,
@@ -54,6 +54,136 @@ const _mat4 = new THREE.Matrix4();
 const _quat = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
 
+// Pre-allocated scratch colors for zero-GC day-to-night interpolation
+const _colA = new THREE.Color();
+const _colB = new THREE.Color();
+const _bulbDayColor = new THREE.Color('#d8cfc0');
+const _bulbNightColor = new THREE.Color('#ffcf75');
+const _windowWarmEmissive = new THREE.Color('#ffb968');
+
+interface LightingKeyframe {
+  min: number;
+  bg: string;
+  hemiSky: string;
+  hemiGround: string;
+  hemiInt: number;
+  sunColor: string;
+  sunInt: number;
+  sunPos: [number, number, number];
+  beamColor: string;
+  beamOpacity: number;
+  shadowOpacity: number;
+  lampInt: number;
+  bulbEmissive: number;
+  envInt: number;
+  exposure: number;
+}
+
+const LIGHTING_KEYFRAMES: readonly LightingKeyframe[] = [
+  {
+    min: 540, // 9:00 AM Morning
+    bg: '#efe8d8',
+    hemiSky: '#dcedea',
+    hemiGround: '#7b9794',
+    hemiInt: 1.15,
+    sunColor: '#ffd3b6',
+    sunInt: 2.05,
+    sunPos: [17, 19, 12],
+    beamColor: '#f7b296',
+    beamOpacity: 0.36,
+    shadowOpacity: 0.22,
+    lampInt: 0.25,
+    bulbEmissive: 0.12,
+    envInt: 1.0,
+    exposure: 1.05,
+  },
+  {
+    min: 750, // 12:30 PM Midday
+    bg: '#f2ecdc',
+    hemiSky: '#e8f4f2',
+    hemiGround: '#87a29e',
+    hemiInt: 1.24,
+    sunColor: '#fff0d6',
+    sunInt: 2.25,
+    sunPos: [10, 25, 10],
+    beamColor: '#f8c9a5',
+    beamOpacity: 0.3,
+    shadowOpacity: 0.2,
+    lampInt: 0.15,
+    bulbEmissive: 0.08,
+    envInt: 1.05,
+    exposure: 1.07,
+  },
+  {
+    min: 960, // 4:00 PM Late Afternoon
+    bg: '#eedbc5',
+    hemiSky: '#f0dfcf',
+    hemiGround: '#7b8a89',
+    hemiInt: 1.12,
+    sunColor: '#ffbe8f',
+    sunInt: 2.1,
+    sunPos: [15, 15, 16],
+    beamColor: '#f7a479',
+    beamOpacity: 0.4,
+    shadowOpacity: 0.23,
+    lampInt: 0.55,
+    bulbEmissive: 0.35,
+    envInt: 0.96,
+    exposure: 1.05,
+  },
+  {
+    min: 1065, // 5:45 PM Sunset / Golden Hour
+    bg: '#dfae8e',
+    hemiSky: '#f5c2a4',
+    hemiGround: '#635c69',
+    hemiInt: 1.0,
+    sunColor: '#ff8e61',
+    sunInt: 1.85,
+    sunPos: [17, 10, 20],
+    beamColor: '#f28258',
+    beamOpacity: 0.44,
+    shadowOpacity: 0.19,
+    lampInt: 1.35,
+    bulbEmissive: 0.9,
+    envInt: 0.86,
+    exposure: 1.04,
+  },
+  {
+    min: 1140, // 7:00 PM Dusk
+    bg: '#4b5a78',
+    hemiSky: '#879ac4',
+    hemiGround: '#394657',
+    hemiInt: 0.78,
+    sunColor: '#a2a7de',
+    sunInt: 0.96,
+    sunPos: [14, 14, 19],
+    beamColor: '#9c7eb8',
+    beamOpacity: 0.1,
+    shadowOpacity: 0.12,
+    lampInt: 2.25,
+    bulbEmissive: 1.45,
+    envInt: 0.72,
+    exposure: 1.0,
+  },
+  {
+    min: 1200, // 8:00 PM Cozy Night
+    bg: '#1e2c3d',
+    hemiSky: '#637fa8',
+    hemiGround: '#293847',
+    hemiInt: 0.66,
+    sunColor: '#8eb5f0',
+    sunInt: 0.74,
+    sunPos: [12, 18, 17],
+    beamColor: '#637fa8',
+    beamOpacity: 0.0,
+    shadowOpacity: 0.08,
+    lampInt: 2.85,
+    bulbEmissive: 1.9,
+    envInt: 0.65,
+    exposure: 1.02,
+  },
+];
+
 export function detectSoftwareGl(): boolean {
   try {
     const canvas = document.createElement('canvas');
@@ -69,14 +199,30 @@ export function detectSoftwareGl(): boolean {
   }
 }
 
+const DEFAULT_PLAYER_APPEARANCE: ActorAppearance = {
+  skinTone: '#f1c7a8',
+  hairColor: '#26292e',
+  hairStyle: 'short',
+  accessory: 'bandana',
+  heightScale: 1.0,
+};
+
 function createActorRig(
   palette: ShopPalette,
   shadowTex: THREE.CanvasTexture,
   shirtHex: string,
   apronHex: string | null,
   hatType: CustomerEntity['hatType'],
+  appearance?: ActorAppearance,
 ): CharacterRig {
   const group = new THREE.Group();
+  const traits: ActorAppearance = appearance ?? {
+    skinTone: '#f1c7a8',
+    hairColor: '#26292e',
+    hairStyle: 'short',
+    accessory: 'none',
+    heightScale: 1.0,
+  };
 
   // Ground contact shadow disc
   const shadowMat = new THREE.MeshBasicMaterial({
@@ -91,6 +237,9 @@ function createActorRig(
   group.add(shadowDisc);
 
   const body = new THREE.Group();
+  const hScale = traits.heightScale;
+  const wScale = 0.96 + (hScale - 0.95) * 0.4;
+  body.scale.set(wScale, hScale, wScale);
   group.add(body);
 
   const pantsMat = new THREE.MeshToonMaterial({
@@ -102,7 +251,7 @@ function createActorRig(
     gradientMap: palette.gradientMap,
   });
   const skinMat = new THREE.MeshToonMaterial({
-    color: 0xf1c7a8,
+    color: traits.skinTone,
     gradientMap: palette.gradientMap,
   });
 
@@ -132,6 +281,16 @@ function createActorRig(
     apron.position.set(0, 0.68, 0.17);
     addInkEdges(apron, palette.inkLineMaterial, 28);
     body.add(apron);
+
+    if (traits.accessory === 'apron_pin') {
+      const pin = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.055, 0.055, 0.03, 10),
+        palette.copperMat,
+      );
+      pin.rotation.x = Math.PI / 2;
+      pin.position.set(-0.11, 0.84, 0.21);
+      body.add(pin);
+    }
   }
 
   const armGeo = new THREE.BoxGeometry(0.14, 0.44, 0.14);
@@ -151,14 +310,64 @@ function createActorRig(
   addInkEdges(head, palette.inkLineMaterial, 28);
   body.add(head);
 
-  // Hair cap
+  // Hair styles
   const hairMat = new THREE.MeshToonMaterial({
-    color: 0x26292e,
+    color: traits.hairColor,
     gradientMap: palette.gradientMap,
   });
   const hair = new THREE.Mesh(new THREE.BoxGeometry(0.41, 0.14, 0.39), hairMat);
   hair.position.y = 1.4;
   body.add(hair);
+
+  if (traits.hairStyle === 'bob') {
+    const backHair = new THREE.Mesh(new THREE.BoxGeometry(0.43, 0.28, 0.14), hairMat);
+    backHair.position.set(0, 1.24, -0.15);
+    addInkEdges(backHair, palette.inkLineMaterial, 28);
+    body.add(backHair);
+  } else if (traits.hairStyle === 'ponytail') {
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.32, 0.14), hairMat);
+    tail.position.set(0, 1.24, -0.24);
+    tail.rotation.x = 0.25;
+    addInkEdges(tail, palette.inkLineMaterial, 28);
+    body.add(tail);
+  } else if (traits.hairStyle === 'bun') {
+    const bun = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.12, 0.14, 10), hairMat);
+    bun.position.set(0, 1.52, -0.06);
+    addInkEdges(bun, palette.inkLineMaterial, 28);
+    body.add(bun);
+  } else if (traits.hairStyle === 'curly') {
+    for (const px of [-0.14, 0, 0.14]) {
+      const puff = new THREE.Mesh(new THREE.DodecahedronGeometry(0.13, 0), hairMat);
+      puff.position.set(px, 1.46, -0.02);
+      body.add(puff);
+    }
+  }
+
+  // Facial & neck accessories for distinct employee silhouettes
+  if (traits.accessory === 'glasses') {
+    const frameMat = palette.darkInkSolid;
+    const lensL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.03), frameMat);
+    lensL.position.set(-0.09, 1.24, 0.19);
+    const lensR = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.03), frameMat);
+    lensR.position.set(0.09, 1.24, 0.19);
+    const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.025, 0.03), frameMat);
+    bridge.position.set(0, 1.25, 0.19);
+    body.add(lensL, lensR, bridge);
+  } else if (traits.accessory === 'headphones') {
+    const cupL = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.06, 10), palette.coralAccent);
+    cupL.rotation.z = Math.PI / 2;
+    cupL.position.set(-0.22, 1.24, 0);
+    const cupR = cupL.clone();
+    cupR.position.x = 0.22;
+    const band = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.05, 0.07), palette.darkInkSolid);
+    band.position.set(0, 1.47, 0);
+    body.add(cupL, cupR, band);
+  } else if (traits.accessory === 'bandana') {
+    const scarf = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.09, 0.36), palette.coralAccent);
+    scarf.position.set(0, 1.03, 0.02);
+    addInkEdges(scarf, palette.inkLineMaterial, 28);
+    body.add(scarf);
+  }
 
   // Hats matching reference characters
   if (hatType === 'sunhat') {
@@ -305,13 +514,29 @@ export function createShopScene(container: HTMLElement): ShopSceneController {
   sunLight.shadow.normalBias = 0.02;
   scene.add(sunLight);
 
-  const counterWarmLight = new THREE.PointLight('#ffe8cb', 0.8, 13, 1.5);
-  counterWarmLight.position.set(1.2, 3.8, -0.5);
+  const counterWarmLight = new THREE.PointLight('#ffe0ac', 0.4, 14, 1.45);
+  counterWarmLight.position.set(1.55, 3.35, -1.1);
   scene.add(counterWarmLight);
+
+  const kitchenWarmLight = new THREE.PointLight('#ffd496', 0.25, 13, 1.45);
+  kitchenWarmLight.position.set(-4.8, 3.3, -1.2);
+  scene.add(kitchenWarmLight);
+
+  const porchWarmLight = new THREE.PointLight('#ffca7a', 0.25, 16, 1.4);
+  porchWarmLight.position.set(8.6, 3.1, 2.2);
+  scene.add(porchWarmLight);
 
   const palette = createShopPalette();
   const maxAniso = renderer.capabilities.getMaxAnisotropy();
   const shadowTex = createContactShadowTexture();
+
+  // Shared emissive bulb material for shop pendants, porch lantern & patio lamps
+  const lampBulbMat = new THREE.MeshStandardMaterial({
+    color: 0xffebc2,
+    emissive: 0xffb84d,
+    emissiveIntensity: 0.2,
+    roughness: 0.3,
+  });
 
   // Pixel-art low-res render target pipeline (Mode B: "3D, PIXEL-ART RENDER")
   let renderStyle: RenderStyle = 'toon';
@@ -732,6 +957,164 @@ export function createShopScene(container: HTMLElement): ShopSceneController {
     counterGroup.add(leaf);
   }
 
+  // Grounded Desk/Counter Lamps & Wall Sconces (no floating mid-air ceiling cords)
+  const addStandingLamp = (lx: number, ly: number, lz: number, parent: THREE.Object3D) => {
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.06, 12), palette.darkInkSolid);
+    base.position.set(lx, ly + 0.03, lz);
+    parent.add(base);
+
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.035, 0.62, 8), palette.copperMat);
+    stem.position.set(lx, ly + 0.36, lz);
+    parent.add(stem);
+
+    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.2, 12, 1, true), palette.wallTealDark);
+    shade.position.set(lx, ly + 0.68, lz);
+    addInkEdges(shade, palette.inkLineMaterial, 28);
+    parent.add(shade);
+
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), lampBulbMat);
+    bulb.position.set(lx, ly + 0.6, lz);
+    parent.add(bulb);
+  };
+  addStandingLamp(1.55, 1.28, -4.25, counterGroup);
+  addStandingLamp(-6.25, 1.22, -3.3, prepGroup);
+
+  const addWallSconce = (wx: number, wy: number, wz: number, dirX: number, dirZ: number) => {
+    const mount = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.22, 0.14), palette.darkInkSolid);
+    mount.position.set(wx, wy, wz);
+    scene.add(mount);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(dirX !== 0 ? 0.28 : 0.06, 0.06, dirZ !== 0 ? 0.28 : 0.06), palette.copperMat);
+    arm.position.set(wx + dirX * 0.14, wy, wz + dirZ * 0.14);
+    scene.add(arm);
+    const globe = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), lampBulbMat);
+    globe.position.set(wx + dirX * 0.26, wy - 0.12, wz + dirZ * 0.26);
+    addInkEdges(globe, palette.inkLineMaterial, 26);
+    scene.add(globe);
+  };
+  addWallSconce(-7.28, 3.45, -4.75, 1, 0);
+  addWallSconce(2.45, 3.2, -7.28, 0, 1);
+
+  // Exterior Entrance Lantern on doorway post
+  const lanternBracket = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.08, 0.08), palette.darkInkSolid);
+  lanternBracket.position.set(7.72, 3.0, 1.05);
+  scene.add(lanternBracket);
+  const lanternGlass = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.3, 0.24), lampBulbMat);
+  lanternGlass.position.set(7.92, 2.8, 1.05);
+  addInkEdges(lanternGlass, palette.inkLineMaterial, 25);
+  scene.add(lanternGlass);
+
+  // ========================
+  // 4B. EXPANSION GEOMETRY (Level 1: Sunlit Bistro Patio, Level 2: Flagship Night Bar)
+  // ========================
+  const patioExpansionGroup = new THREE.Group();
+  patioExpansionGroup.visible = false;
+  scene.add(patioExpansionGroup);
+
+  const patioDeck = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.14, 8.8), palette.woodWarm);
+  patioDeck.position.set(10.0, 0.07, 1.3);
+  patioDeck.receiveShadow = true;
+  addInkEdges(patioDeck, palette.inkLineMaterial, 24);
+  patioExpansionGroup.add(patioDeck);
+
+  const addPatioBistroSet = (tx: number, tz: number, cupColor: THREE.MeshToonMaterial) => {
+    const tablePost = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.72, 10), palette.darkInkSolid);
+    tablePost.position.set(tx, 0.48, tz);
+    patioExpansionGroup.add(tablePost);
+    const tableTop = new THREE.Mesh(new THREE.CylinderGeometry(0.58, 0.58, 0.08, 16), palette.counterCream);
+    tableTop.position.set(tx, 0.86, tz);
+    tableTop.castShadow = true;
+    addInkEdges(tableTop, palette.inkLineMaterial, 26);
+    patioExpansionGroup.add(tableTop);
+
+    // Decorative boba cup on patio table
+    const pCup = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.07, 0.22, 10), cupColor);
+    pCup.position.set(tx + 0.12, 1.01, tz - 0.08);
+    addInkEdges(pCup, palette.inkLineMaterial, 26);
+    patioExpansionGroup.add(pCup);
+
+    for (const sz of [-0.82, 0.82]) {
+      const sSeat = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.08, 12), palette.coralAccent);
+      sSeat.position.set(tx, 0.52, tz + sz);
+      addInkEdges(sSeat, palette.inkLineMaterial, 26);
+      patioExpansionGroup.add(sSeat);
+      const sLeg = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.42, 8), palette.darkInkSolid);
+      sLeg.position.set(tx, 0.3, tz + sz);
+      patioExpansionGroup.add(sLeg);
+    }
+  };
+  addPatioBistroSet(10.1, -1.2, palette.peachMat);
+  addPatioBistroSet(10.1, 4.4, palette.wallSageInner);
+
+  // Patio planter + cozy lantern post
+  const planter = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.48, 1.6), palette.wallTealDark);
+  planter.position.set(11.75, 0.34, 1.2);
+  addInkEdges(planter, palette.inkLineMaterial, 24);
+  patioExpansionGroup.add(planter);
+  for (let p = 0; p < 3; p++) {
+    const bush = new THREE.Mesh(new THREE.DodecahedronGeometry(0.32, 0), palette.plantGreen);
+    bush.position.set(11.75, 0.72, 0.72 + p * 0.48);
+    addInkEdges(bush, palette.inkLineMaterial, 28);
+    patioExpansionGroup.add(bush);
+  }
+
+  const patioPostA = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 2.75, 8), palette.darkInkSolid);
+  patioPostA.position.set(11.8, 1.45, 5.2);
+  patioExpansionGroup.add(patioPostA);
+  const patioLanternA = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.36, 0.32), lampBulbMat);
+  patioLanternA.position.set(11.8, 2.86, 5.2);
+  addInkEdges(patioLanternA, palette.inkLineMaterial, 25);
+  patioExpansionGroup.add(patioLanternA);
+
+  // Level 2: Flagship Night Tea Bar & Marquee Expansion
+  const flagshipExpansionGroup = new THREE.Group();
+  flagshipExpansionGroup.visible = false;
+  scene.add(flagshipExpansionGroup);
+
+  // Glowing Shop Sign Box above Pickup Window
+  const marqueeFrame = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.72, 0.28), palette.wallTealDark);
+  marqueeFrame.position.set(4.1, 4.2, -7.22);
+  addInkEdges(marqueeFrame, palette.inkLineMaterial, 24);
+  flagshipExpansionGroup.add(marqueeFrame);
+  const marqueeFace = new THREE.Mesh(new THREE.BoxGeometry(3.1, 0.48, 0.3), lampBulbMat);
+  marqueeFace.position.set(4.1, 4.2, -7.2);
+  flagshipExpansionGroup.add(marqueeFace);
+
+  // Secondary Express Tasting Bar & Pastry Dome on Customer Right Wing
+  const expressBarBody = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.05, 0.95), palette.wallTealDark);
+  expressBarBody.position.set(4.2, 0.54, -5.6);
+  expressBarBody.castShadow = true;
+  addInkEdges(expressBarBody, palette.inkLineMaterial, 24);
+  flagshipExpansionGroup.add(expressBarBody);
+  const expressBarTop = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.12, 1.1), palette.counterCream);
+  expressBarTop.position.set(4.2, 1.12, -5.6);
+  addInkEdges(expressBarTop, palette.inkLineMaterial, 24);
+  flagshipExpansionGroup.add(expressBarTop);
+  const pastryCase = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.44, 0.58), palette.glassPane);
+  pastryCase.position.set(3.55, 1.4, -5.6);
+  addInkEdges(pastryCase, palette.inkLineMaterial, 24);
+  flagshipExpansionGroup.add(pastryCase);
+  const espressoTower = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.56, 0.54), palette.copperMat);
+  espressoTower.position.set(4.8, 1.46, -5.6);
+  addInkEdges(espressoTower, palette.inkLineMaterial, 24);
+  flagshipExpansionGroup.add(espressoTower);
+
+  // Second Patio Lantern + Festive Warm String-Light Bulbs
+  const patioPostB = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 2.75, 8), palette.darkInkSolid);
+  patioPostB.position.set(11.8, 1.45, -2.55);
+  flagshipExpansionGroup.add(patioPostB);
+  const patioLanternB = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.36, 0.32), lampBulbMat);
+  patioLanternB.position.set(11.8, 2.86, -2.55);
+  addInkEdges(patioLanternB, palette.inkLineMaterial, 25);
+  flagshipExpansionGroup.add(patioLanternB);
+  for (let b = 0; b < 6; b++) {
+    const t = (b + 1) / 7;
+    const bz = -2.55 + t * (5.2 - -2.55);
+    const sag = Math.sin(t * Math.PI) * 0.25;
+    const stringBulb = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), lampBulbMat);
+    stringBulb.position.set(11.8, 2.78 - sag, bz);
+    flagshipExpansionGroup.add(stringBulb);
+  }
+
   // ========================
   // 5. FLOOR PROPS: BOBA-BOT ROVER, TROLLEY CART, STACKED BOXES, FAN
   // ========================
@@ -840,11 +1223,19 @@ export function createShopScene(container: HTMLElement): ShopSceneController {
   scene.add(steamMesh);
 
   // ========================
-  // 7. CHARACTER RIGS (Barista + Customer Pool)
+  // 7. CHARACTER RIGS (Barista + Staff Pool + Customer Pool)
   // ========================
-  const baristaRig = createActorRig(palette, shadowTex, '#2f726f', '#f3ecde', 'cap');
+  const baristaRig = createActorRig(
+    palette,
+    shadowTex,
+    '#2f726f',
+    '#f3ecde',
+    'cap',
+    DEFAULT_PLAYER_APPEARANCE,
+  );
   scene.add(baristaRig.group);
 
+  const employeeRigs = new Map<string, CharacterRig>();
   const customerRigs = new Map<string, CharacterRig>();
 
   // ========================
@@ -905,9 +1296,95 @@ export function createShopScene(container: HTMLElement): ShopSceneController {
 
   let steamTime = 0;
 
+  const updateDayNightLighting = (simMinutes: number, expansionLevel: number) => {
+    const kfs = LIGHTING_KEYFRAMES;
+    let a = kfs[0];
+    let b = kfs[kfs.length - 1];
+    let alpha = 0;
+
+    if (simMinutes <= kfs[0].min) {
+      a = b = kfs[0];
+    } else if (simMinutes >= kfs[kfs.length - 1].min) {
+      a = b = kfs[kfs.length - 1];
+    } else {
+      for (let i = 0; i < kfs.length - 1; i++) {
+        if (simMinutes >= kfs[i].min && simMinutes <= kfs[i + 1].min) {
+          a = kfs[i];
+          b = kfs[i + 1];
+          alpha = (simMinutes - a.min) / (b.min - a.min);
+          break;
+        }
+      }
+    }
+
+    const lerpNum = (v1: number, v2: number) => v1 + (v2 - v1) * alpha;
+
+    // Sky & Fog
+    _colA.set(a.bg);
+    _colB.set(b.bg);
+    _colA.lerp(_colB, alpha);
+    (scene.background as THREE.Color).copy(_colA);
+    if (scene.fog) {
+      (scene.fog as THREE.Fog).color.copy(_colA);
+    }
+
+    // Hemisphere Fill
+    _colA.set(a.hemiSky);
+    _colB.set(b.hemiSky);
+    hemiLight.color.copy(_colA.lerp(_colB, alpha));
+
+    _colA.set(a.hemiGround);
+    _colB.set(b.hemiGround);
+    hemiLight.groundColor.copy(_colA.lerp(_colB, alpha));
+    hemiLight.intensity = lerpNum(a.hemiInt, b.hemiInt);
+
+    // Sun / Moon Key Light
+    _colA.set(a.sunColor);
+    _colB.set(b.sunColor);
+    sunLight.color.copy(_colA.lerp(_colB, alpha));
+    sunLight.intensity = lerpNum(a.sunInt, b.sunInt);
+    sunLight.position.set(
+      lerpNum(a.sunPos[0], b.sunPos[0]),
+      lerpNum(a.sunPos[1], b.sunPos[1]),
+      lerpNum(a.sunPos[2], b.sunPos[2]),
+    );
+
+    // Sunbeam wedge & architectural cast shadow
+    _colA.set(a.beamColor);
+    _colB.set(b.beamColor);
+    sunBeamMat.color.copy(_colA.lerp(_colB, alpha));
+    const beamOp = lerpNum(a.beamOpacity, b.beamOpacity);
+    sunBeamMat.opacity = beamOp;
+    wallBeam.visible = beamOp > 0.015;
+    floorBeam.visible = beamOp > 0.015;
+    extCastShadowMat.opacity = lerpNum(a.shadowOpacity, b.shadowOpacity);
+
+    // Interior & Patio Warm Lights
+    const lampInt = lerpNum(a.lampInt, b.lampInt);
+    counterWarmLight.intensity = lampInt;
+    kitchenWarmLight.intensity = lampInt * 0.85;
+    porchWarmLight.intensity = lampInt * (expansionLevel >= 1 ? 1.18 : 0.88);
+
+    const bulbEm = lerpNum(a.bulbEmissive, b.bulbEmissive);
+    lampBulbMat.emissiveIntensity = bulbEm;
+    const bulbMix = Math.min(1, bulbEm / 1.4);
+    lampBulbMat.color.copy(_bulbDayColor).lerp(_bulbNightColor, bulbMix);
+
+    palette.glassPane.emissive.copy(_windowWarmEmissive);
+    palette.glassPane.emissiveIntensity = bulbMix * 0.28;
+
+    scene.environmentIntensity = lerpNum(a.envInt, b.envInt);
+    renderer.toneMappingExposure = lerpNum(a.exposure, b.exposure);
+  };
+
   const updateAndRender = (state: SimState, dt: number) => {
     steamTime += dt;
     controls.update();
+
+    // Update Day-to-Night Lighting & Shop Expansion visibility
+    updateDayNightLighting(state.simMinutes, state.expansionLevel);
+    patioExpansionGroup.visible = state.expansionLevel >= 1;
+    flagshipExpansionGroup.visible = state.expansionLevel >= 2;
 
     // Update clock hand & fan spin
     clockMinuteHand.rotation.x = -(state.simMinutes / 60) * Math.PI * 2;
@@ -947,6 +1424,45 @@ export function createShopScene(container: HTMLElement): ShopSceneController {
       ? Math.abs(Math.sin(state.barista.walkPhase)) * 0.05
       : Math.sin(steamTime * 2.5) * 0.015;
     baristaRig.cupProp.visible = Boolean(state.barista.holdingCupColor);
+
+    // Sync Hired Employees (reuse rigs by ID, remove fired)
+    const activeEmpIds = new Set(state.employees.map((e) => e.id));
+    for (const [id, rig] of employeeRigs.entries()) {
+      if (!activeEmpIds.has(id)) {
+        scene.remove(rig.group);
+        employeeRigs.delete(id);
+      }
+    }
+    for (const emp of state.employees) {
+      let rig = employeeRigs.get(emp.id);
+      if (!rig) {
+        const apronHex =
+          emp.role === 'barista' ? '#235958' : emp.role === 'cashier' ? '#d6a34a' : '#f3ecde';
+        rig = createActorRig(
+          palette,
+          shadowTex,
+          emp.shirtColor,
+          apronHex,
+          emp.hatType,
+          emp.appearance,
+        );
+        scene.add(rig.group);
+        employeeRigs.set(emp.id, rig);
+      }
+      rig.group.visible = emp.onDuty;
+      if (!emp.onDuty) continue;
+
+      rig.group.position.set(emp.x, 0, emp.z);
+      rig.group.rotation.y = emp.facing;
+      const eMoving = Math.hypot(emp.x - emp.targetX, emp.z - emp.targetZ) > 0.08;
+      const eStride = eMoving ? Math.sin(emp.walkPhase) * 0.38 : 0;
+      rig.leftLeg.rotation.x = eStride;
+      rig.rightLeg.rotation.x = -eStride;
+      rig.body.position.y = eMoving
+        ? Math.abs(Math.sin(emp.walkPhase)) * 0.05
+        : Math.sin(steamTime * 2.4 + emp.z) * 0.015;
+      rig.cupProp.visible = Boolean(emp.holdingCupColor);
+    }
 
     // Sync Boba-Bot
     bobaBotGroup.position.set(state.bobaBot.x, 0, state.bobaBot.z);
@@ -1027,6 +1543,13 @@ export function createShopScene(container: HTMLElement): ShopSceneController {
       const a = projectPoint(c.x, 2.15, c.z, vpW, vpH);
       a.id = c.id;
       anchors.set(c.id, a);
+    }
+
+    for (const emp of state.employees) {
+      if (!emp.onDuty) continue;
+      const a = projectPoint(emp.x, 2.05, emp.z, vpW, vpH);
+      a.id = emp.id;
+      anchors.set(emp.id, a);
     }
 
     for (const ev of state.events) {

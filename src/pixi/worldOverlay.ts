@@ -74,12 +74,14 @@ export async function createWorldOverlay(
 
   const bubbleLayer = new Container();
   const stationLayer = new Container();
+  const staffLayer = new Container();
   const particleLayer = new Container();
   const popupLayer = new Container();
-  app.stage.addChild(bubbleLayer, stationLayer, particleLayer, popupLayer);
+  app.stage.addChild(bubbleLayer, stationLayer, staffLayer, particleLayer, popupLayer);
 
   const bubbleNodes = new Map<string, BubbleNode>();
   const stationNodes = new Map<string, BubbleNode>();
+  const staffNodes = new Map<string, BubbleNode>();
   const popupNodes = new Map<string, EventPopupNode>();
   const seenEvents = new Set<string>();
   const particles: BurstParticle[] = [];
@@ -272,6 +274,37 @@ export async function createWorldOverlay(
     } else {
       const n = stationNodes.get('tea_brewer');
       if (n) n.container.visible = false;
+    }
+
+    // 2b. On-duty staff miniature task badges
+    const activeStaffIds = new Set<string>();
+    if (state.phase === 'playing') {
+      for (const emp of state.employees) {
+        if (!emp.onDuty) continue;
+        const anchor = anchors.get(emp.id);
+        if (!anchor || !anchor.visible) continue;
+        activeStaffIds.add(emp.id);
+        const node = getOrCreateBubble(staffNodes, staffLayer, emp.id);
+        node.container.visible = true;
+        const assignedOrd = emp.assignedOrderId
+          ? state.orders.find((o) => o.id === emp.assignedOrderId)
+          : null;
+        const prog = assignedOrd ? assignedOrd.sealProgress : emp.task === 'prepping' ? 0.6 : 0;
+        const tag =
+          emp.task === 'crafting'
+            ? `${emp.name} · Brew`
+            : emp.task === 'prepping'
+              ? `${emp.name} · Prep`
+              : emp.role === 'cashier'
+                ? `${emp.name} · Host`
+                : emp.name;
+        drawStationBadge(node, tag, prog, emp.task === 'crafting' || emp.task === 'prepping', anchor.x, anchor.y);
+      }
+    }
+    for (const [id, node] of staffNodes.entries()) {
+      if (!activeStaffIds.has(id)) {
+        node.container.visible = false;
+      }
     }
 
     // 3. Floating Event Popups + Trigger Particle Bursts

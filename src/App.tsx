@@ -7,29 +7,119 @@ import { shopAudio } from './game/audio';
 import {
   advanceToNextDay,
   buyRestockPack,
+  buyShopExpansion,
   buyShopUpgrade,
   createInitialSimState,
+  cycleSimSpeed,
+  fireEmployee,
+  getUnlockedTeaBases,
+  hireEmployee,
+  replyToCustomerReview,
+  reviewEmployee,
+  setSimSpeed,
+  setTipJarMode,
   startBrewTeaBatch,
   startCookBobaBatch,
   startSealingSelectedOrder,
   stepSimulation,
+  tipEmployee,
+  toggleEmployeeAutoRestock,
+  toggleEmployeeDuty,
+  trainEmployee,
+  unlockResearch,
 } from './game/simulation';
 import type {
   DrinkBuild,
+  EmployeeReviewRecord,
   RenderStyle,
   ShopUpgrades,
   SimState,
+  TipJarMode,
 } from './game/types';
 import { createDrinkCrafter, type DrinkCrafterController } from './pixi/drinkCrafter';
 import { createWorldOverlay, type WorldOverlayController } from './pixi/worldOverlay';
 import { createShopScene, type ShopSceneController } from './three/shopScene';
 
 export default function App() {
-  const initialAutostart =
-    typeof window !== 'undefined' &&
-    new URLSearchParams(window.location.search).get('autostart') === '1';
+  const searchParams =
+    typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const initialAutostart = searchParams?.get('autostart') === '1';
 
-  const simRef = useRef<SimState>(createInitialSimState(initialAutostart));
+  const simRef = useRef<SimState>(
+    (() => {
+      const s = createInitialSimState(initialAutostart);
+      const timeParam = Number(searchParams?.get('time'));
+      if (Number.isFinite(timeParam) && timeParam >= 540 && timeParam <= 1260) {
+        s.simMinutes = timeParam;
+      }
+      const expandParam = Number(searchParams?.get('expand'));
+      if (expandParam === 1 || expandParam === 2) {
+        s.cash = 400;
+        for (let lv = 1; lv <= expandParam; lv++) {
+          buyShopExpansion(s, lv);
+        }
+      }
+      if (searchParams?.get('dayend') === '1') {
+        s.phase = 'playing';
+        s.dayStats.drinksServed = 7;
+        s.dayStats.perfectDrinks = 5;
+        s.dayStats.walkouts = 1;
+        s.dayStats.revenue = 47.5;
+        s.dayStats.tipsEarned = 6.8;
+        s.dayStats.visitLog = [
+          {
+            customerName: 'Kenji',
+            archetype: 'student',
+            drinkName: 'Classic Pearl Milk Tea',
+            accuracy: 1,
+            waitRatio: 0.2,
+            walkedOut: false,
+            bobaFreshness: 92,
+            staffName: 'Lin',
+          },
+          {
+            customerName: 'Mina',
+            archetype: 'critic',
+            drinkName: 'Uji Matcha Cloud',
+            accuracy: 1,
+            waitRatio: 0.76,
+            walkedOut: false,
+            bobaFreshness: 88,
+            staffName: null,
+          },
+          {
+            customerName: 'Devon',
+            archetype: 'office',
+            drinkName: 'Brown Sugar Boba Latte',
+            accuracy: 0.72,
+            waitRatio: 0.48,
+            walkedOut: false,
+            bobaFreshness: 82,
+            staffName: null,
+          },
+          {
+            customerName: 'Chloe',
+            archetype: 'foodie',
+            drinkName: 'Roasted Oolong Oat',
+            accuracy: 0,
+            waitRatio: 1,
+            walkedOut: true,
+            bobaFreshness: 75,
+            staffName: null,
+          },
+        ];
+        if (s.employees[0]) {
+          s.employees[0].drinksCrafted = 4;
+          s.employees[0].accurateCrafts = 3;
+          s.employees[0].dailyDrinksServed = 4;
+          s.employees[0].dailyErrors = 1;
+        }
+        s.simMinutes = 1265;
+        stepSimulation(s, 0.05);
+      }
+      return s;
+    })(),
+  );
   const [hudVersion, setHudVersion] = useState(0);
   const [renderStyle, setRenderStyle] = useState<RenderStyle>('toon');
   const [muted, setMuted] = useState(false);
@@ -77,6 +167,8 @@ export default function App() {
     let prevOrdersLen = simRef.current.orders.length;
     let prevServed = simRef.current.totalServed;
     let prevWalkouts = simRef.current.dayStats.walkouts;
+    let lastBanner: string | null = simRef.current.bannerMessage;
+    let bannerAge = 0;
 
     void createWorldOverlay(pixiEl, shopScene.isSoftwareGl).then((ctrl) => {
       if (disposed) {
@@ -161,6 +253,18 @@ export default function App() {
       const sim = simRef.current;
       if (!pantryOpenRef.current) {
         stepSimulation(sim, rawDt);
+      }
+
+      if (sim.bannerMessage !== lastBanner) {
+        lastBanner = sim.bannerMessage;
+        bannerAge = 0;
+      } else if (sim.bannerMessage) {
+        bannerAge += rawDt;
+        if (bannerAge > 2.8) {
+          sim.bannerMessage = null;
+          lastBanner = null;
+          bannerAge = 0;
+        }
       }
 
       // Trigger procedural SFX on discrete state changes
@@ -379,16 +483,15 @@ export default function App() {
         return;
       }
 
-      const teaShortcuts: Record<string, DrinkBuild['teaBase']> = {
-        Digit1: 'assam',
-        Digit2: 'jasmine',
-        Digit3: 'oolong',
-        Digit4: 'matcha',
-        Digit5: 'taro',
-      };
-      if (teaShortcuts[e.code]) {
-        e.preventDefault();
-        handleUpdateBuild({ teaBase: teaShortcuts[e.code] });
+      const unlockedTeas = getUnlockedTeaBases(sim.unlockedResearch);
+      const digitMatch = /^Digit([1-9])$/.exec(e.code);
+      if (digitMatch) {
+        const teaIdx = Number(digitMatch[1]) - 1;
+        const chosenTea = unlockedTeas[teaIdx];
+        if (chosenTea) {
+          e.preventDefault();
+          handleUpdateBuild({ teaBase: chosenTea });
+        }
       }
     };
 
@@ -433,8 +536,12 @@ export default function App() {
           crafterMountRef={crafterMountRef}
           onToggleBench={() => setBenchCollapsed((c) => !c)}
           onChangeRenderStyle={handleChangeRenderStyle}
-          onToggleSpeed={() => {
-            sim.speedMultiplier = sim.speedMultiplier === 1 ? 2 : 1;
+          onCycleSpeed={() => {
+            cycleSimSpeed(sim);
+            syncHud();
+          }}
+          onSetSpeed={(speed) => {
+            setSimSpeed(sim, speed);
             syncHud();
           }}
           onOpenPantry={() => setPantryOpen(true)}
@@ -464,6 +571,76 @@ export default function App() {
           }}
           onBuyUpgrade={(key: keyof ShopUpgrades) => {
             if (buyShopUpgrade(sim, key)) {
+              shopAudio.playCash(true);
+              syncHud();
+            }
+          }}
+          onUnlockResearch={(researchId) => {
+            if (unlockResearch(sim, researchId)) {
+              shopAudio.playCash(true);
+              syncHud();
+            }
+          }}
+          onHireEmployee={(candidateId) => {
+            if (hireEmployee(sim, candidateId)) {
+              shopAudio.playBell();
+              syncHud();
+            }
+          }}
+          onToggleEmployeeDuty={(empId) => {
+            if (toggleEmployeeDuty(sim, empId)) {
+              shopAudio.playPlop(1.0);
+              syncHud();
+            }
+          }}
+          onToggleEmployeeAutoRestock={(empId) => {
+            if (toggleEmployeeAutoRestock(sim, empId)) {
+              shopAudio.playPlop(1.05);
+              syncHud();
+            }
+          }}
+          onTrainEmployee={(empId) => {
+            if (trainEmployee(sim, empId)) {
+              shopAudio.playCash(true);
+              syncHud();
+            }
+          }}
+          onTipEmployee={(empId, amount) => {
+            if (tipEmployee(sim, empId, amount)) {
+              shopAudio.playCash(true);
+              syncHud();
+            }
+          }}
+          onReviewEmployee={(
+            empId,
+            rating,
+            tag: EmployeeReviewRecord['tag'],
+            note,
+          ) => {
+            if (reviewEmployee(sim, empId, rating, tag, note)) {
+              shopAudio.playPlop(1.2);
+              syncHud();
+            }
+          }}
+          onFireEmployee={(empId) => {
+            if (fireEmployee(sim, empId)) {
+              shopAudio.playPlop(0.75);
+              syncHud();
+            }
+          }}
+          onBuyExpansion={(targetLevel) => {
+            if (buyShopExpansion(sim, targetLevel)) {
+              shopAudio.playCash(true);
+              syncHud();
+            }
+          }}
+          onSetTipJarMode={(mode: TipJarMode) => {
+            setTipJarMode(sim, mode);
+            shopAudio.playPlop(1.1);
+            syncHud();
+          }}
+          onReplyCustomerReview={(reviewId, action) => {
+            if (replyToCustomerReview(sim, reviewId, action)) {
               shopAudio.playCash(true);
               syncHud();
             }
